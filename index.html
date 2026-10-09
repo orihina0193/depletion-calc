@@ -146,7 +146,7 @@
   // 画面の上のほうにある「残存資源」の数字を探す範囲（動画の高さに対する割合）。
   // まず狭い範囲で探し、見つからなければ広い範囲で探す。
   const BANDS = [[0.08, 0.32], [0.0, 0.5]];
-  const MAX_FRAMES = 40;       // 読み取るフレーム数の上限
+  const MAX_FRAMES = 60;      // 読み取るフレーム数の上限
   const MAX_WIDTH = 1100;      // OCRに渡す画像の最大幅(px)
   const MIN_SPAN_SEC = 8;      // これ未満だと精度が落ちる
 
@@ -155,6 +155,8 @@
   let busy = false;
   let rows = [];               // {t, v, use, thumb}
   let lastSummary = '';
+  // 動画の時刻の基準：endEpoch は「動画の最後」が撮られた時刻(ms)
+  let ref = { endEpoch: Date.now(), duration: 0, fromFile: false };
 
   // ---------- 表示用 ----------
   const fmtInt = (n) => Math.round(n).toLocaleString('ja-JP');
@@ -242,7 +244,16 @@
     let num = 0, den = 0;
     for (const p of pts) { num += (p.t - mt) * (p.v - mv); den += (p.t - mt) ** 2; }
     const slope = den ? num / den : 0;
-    const rate = -slope;
+    // 隣り合うフレーム間の「1秒あたりの減少量」の中央値を使う。
+    // 全体を直線で近似すると、録画のコマ落ちなどの小さなずれに引っ張られて
+    // 少し遅めに出るため（ゲームのタイマーと比べて約2分のずれ）。
+    // 中央値なら、そうしたずれの影響を受けず、ゲームの値とほぼ一致する。
+    const pair = [];
+    for (let i = 1; i < pts.length; i++) {
+      const dt = pts[i].t - pts[i - 1].t;
+      if (dt >= 0.3) pair.push((pts[i - 1].v - pts[i].v) / dt);
+    }
+    const rate = pair.length >= 3 ? median(pair) : -slope;
     if (!(rate > 0)) return { error: '残存資源が減っていません（増減なし）。採集中の画面で、もう少し長く録画してみてください。' };
 
     return {
@@ -400,8 +411,12 @@
         `<p class="notice warn">使えた範囲が${a.span.toFixed(0)}秒しかありません。20秒以上映っている動画のほうが正確です。</p>`);
     }
 
-    const done = new Date(Date.now() + a.remainSec * 1000);
-    const hm = fmtHM(a.remainSec);
+    // 「最後に数字が読めたフレーム」が実際に撮られた時刻を基準にする。
+    // 録画から時間がたってから計算しても、枯渇の時刻がずれないようにするため。
+    const lastFrameEpoch = ref.endEpoch - Math.max(0, ref.duration - a.last.t) * 1000;
+    const done = new Date(lastFrameEpoch + a.remainSec * 1000);
+    const remainNow = Math.max(0, (done.getTime() - Date.now()) / 1000);
+    const hm = fmtHM(remainNow);
     const perMin = fmtInt(a.perMin);
     const when = fmtJst(done);
     lastSummary =
@@ -420,6 +435,7 @@
       `<dl>` +
         `<dt>30秒あたりの減少</dt><dd>-${fmtInt(a.per30)}</dd>` +
         `<dt>最後に読めた残存資源</dt><dd>${fmtInt(a.last.v)}</dd>` +
+        `<dt>その時刻（${ref.fromFile ? '録画から' : '今を基準'}）</dt><dd>${esc(fmtJst(new Date(lastFrameEpoch)))}</dd>` +
         `<dt>計算に使った範囲</dt><dd>${a.span.toFixed(1)}秒（${a.n}か所）</dd>` +
       `</dl>` +
       `<div class="actions">` +
@@ -448,6 +464,13 @@
     try {
       url = await loadVideo(file);
       const dur = video.duration;
+      {
+        // 画面録画ファイルの更新時刻は、録画を止めた時刻にほぼ等しい。
+        // 12時間より古い・未来の場合はコピー等で変わった可能性があるので、今の時刻を使う。
+        const now = Date.now(), age = now - (file.lastModified || 0);
+        const ok = file.lastModified > 0 && age >= -60000 && age <= 12 * 3600 * 1000;
+        ref = { endEpoch: ok ? Math.min(file.lastModified, now) : now, duration: dur, fromFile: ok };
+      }
       if (!isFinite(dur) || dur < 3 || !video.videoWidth) {
         throw new Error('この動画は読み込めませんでした（長さが取得できません）。');
       }
