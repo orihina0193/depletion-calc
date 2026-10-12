@@ -63,6 +63,22 @@
   .hero .msg b { color: var(--accent); font-size: 1.25rem; }
   .hero .big { font-size: 2.3rem; font-weight: 800; color: var(--accent); line-height: 1.3; }
   .hero .sub { color: var(--muted); font-size: .95rem; }
+  .hero .tag {
+    display: inline-block; font-size: .8rem; font-weight: 700; letter-spacing: .04em;
+    color: var(--muted); border: 1px solid var(--line); border-radius: 99px;
+    padding: 1px 10px; margin-bottom: 4px;
+  }
+  .hero.buffed { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 18px; }
+  .hero.buffed .tag { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+  .hero.buffed .detail { color: var(--muted); font-size: .85rem; margin: 2px 0 0; }
+  #buffList label {
+    display: flex; align-items: center; gap: 12px; min-height: 52px;
+    padding: 6px 4px; border-top: 1px solid var(--line); cursor: pointer;
+  }
+  #buffList label:first-child { border-top: 0; }
+  #buffList input { width: 26px; height: 26px; accent-color: var(--accent); flex: none; }
+  #buffList .nm { flex: 1; font-weight: 600; }
+  #buffList .pc { color: var(--accent); font-weight: 800; font-variant-numeric: tabular-nums; }
   dl { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; margin: 0; }
   dt { color: var(--muted); font-size: .9rem; }
   dd { margin: 0; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -104,6 +120,13 @@
     <label class="btn" for="file">動画を選ぶ</label>
     <input class="sr" id="file" type="file" accept="video/*">
     <p class="hint">録画のコツ：ギルド農場の「詳細情報」画面（残存資源が出る画面）を映したまま、20秒以上録画してください。録画の最初や最後にコントロールセンターなど他の画面が映っていても大丈夫です。</p>
+  </section>
+
+  <section class="card" id="buffCard">
+    <h2>バフを使ったらどうなる？</h2>
+    <p class="hint" style="margin:0 0 6px">チェックを入れると、「今のまま」に加えて「そのバフを使った場合」の見込みも出します。</p>
+    <div id="buffList"></div>
+    <p class="hint">録画中はこれらのバフが効いていない状態を基準にして、今から使い始めた場合を計算します。複数のバフは足し算です（国＋ギルド＝ ＋70%）。</p>
   </section>
 
   <section class="card" id="progressCard" hidden>
@@ -155,6 +178,16 @@
   let busy = false;
   let rows = [];               // {t, v, use, thumb}
   let lastSummary = '';
+  let lastNotices = [];
+
+  // バフ（採集速度の上昇率）。増やす・変えるときはここだけ直せばOK。
+  const BUFFS = [
+    { id: 'country',  name: '国バフ',     pct: 20 },
+    { id: 'guild',    name: 'ギルドバフ', pct: 50 },
+    { id: 'personal', name: '個人バフ',   pct: 50 },
+  ];
+  const buffChecked = {};   // id -> true/false
+  const selectedBuffs = () => BUFFS.filter((b) => buffChecked[b.id]);
   // 動画の時刻の基準：endEpoch は「動画の最後」が撮られた時刻(ms)
   let ref = { endEpoch: Date.now(), duration: 0, fromFile: false };
 
@@ -390,6 +423,7 @@
   }
 
   function showResult(extraNotices) {
+    if (extraNotices !== undefined) lastNotices = extraNotices;
     const a = analyze(rows);
     const notices = $('#notices');
     const body = $('#resultBody');
@@ -398,7 +432,7 @@
     lastSummary = '';
     $('#resultCard').hidden = false;
 
-    (extraNotices || []).forEach((n) => {
+    lastNotices.forEach((n) => {
       notices.insertAdjacentHTML('beforeend', `<p class="notice ${n.kind}">${esc(n.text)}</p>`);
     });
 
@@ -425,13 +459,48 @@
       `（1分あたり ${perMin} 減少）\n` +
       `日本時間 ${when}頃に尽きる見込みです。`;
 
+    // ---- バフを使った場合（今から使い始める想定）----
+    // 録画のあとも資源は減り続けているので、まず「今の残り」を出し、
+    // そこから「採集速度が (1 + バフ合計) 倍」になったとして計算する。
+    const picked = selectedBuffs();
+    let buffHtml = '';
+    if (picked.length) {
+      const sumPct = picked.reduce((s, b) => s + b.pct, 0);
+      const mult = 1 + sumPct / 100;
+      const elapsed = Math.max(0, (Date.now() - lastFrameEpoch) / 1000);
+      const resNow = Math.max(0, a.last.v - a.rate * elapsed);
+      const bRemain = resNow / (a.rate * mult);
+      const bDone = new Date(Date.now() + bRemain * 1000);
+      const bHm = fmtHM(bRemain);
+      const bPerMin = fmtInt(a.perMin * mult);
+      const bWhen = fmtJst(bDone);
+      const names = picked.map((b) => b.name).join('・');
+      const detail = picked.map((b) => `${b.name} +${b.pct}%`).join(' / ') + `（合計 採集速度 +${sumPct}%）`;
+      lastSummary =
+        `【今のまま】\n` + lastSummary +
+        `\n\n【${names}を使った場合（採集速度 +${sumPct}%）】\n` +
+        `資源が尽きるまで、あと ${bHm}です。\n` +
+        `（1分あたり ${bPerMin} 減少）\n` +
+        `日本時間 ${bWhen}頃に尽きる見込みです。`;
+      buffHtml =
+        `<div class="hero buffed">` +
+          `<div class="tag">${esc(names)}を使った場合</div>` +
+          `<div class="detail">${esc(detail)}</div>` +
+          `<div class="msg">資源が尽きるまで、あと<br><span class="big">${esc(bHm)}</span>です。</div>` +
+          `<div class="sub">（1分あたり ${bPerMin} 減少）</div>` +
+          `<div class="msg">日本時間 <b>${esc(bWhen)}</b> 頃に<br>尽きる見込みです。</div>` +
+        `</div>`;
+    }
+
     body.innerHTML =
       `<div class="hero">` +
+        (picked.length ? `<div class="tag">今のまま</div>` : '') +
         `<div class="label">ギルド資源、今の人数で…</div>` +
         `<div class="msg">資源が尽きるまで、あと<br><span class="big">${esc(hm)}</span>です。</div>` +
         `<div class="sub">（1分あたり ${perMin} 減少）</div>` +
         `<div class="msg">日本時間 <b>${esc(when)}</b> 頃に<br>尽きる見込みです。</div>` +
       `</div>` +
+      buffHtml +
       `<dl>` +
         `<dt>30秒あたりの減少</dt><dd>-${fmtInt(a.per30)}</dd>` +
         `<dt>最後に読めた残存資源</dt><dd>${fmtInt(a.last.v)}</dd>` +
@@ -519,6 +588,24 @@
       busy = false;
     }
   }
+
+  // バフのチェック欄を作る（変えるたびに結果を計算し直す）
+  (function initBuffs() {
+    const box = $('#buffList');
+    BUFFS.forEach((b) => {
+      buffChecked[b.id] = false;
+      const lab = document.createElement('label');
+      lab.innerHTML =
+        `<input type="checkbox" id="buff-${b.id}">` +
+        `<span class="nm">${esc(b.name)}</span>` +
+        `<span class="pc">採集速度 +${b.pct}%</span>`;
+      lab.querySelector('input').addEventListener('change', (e) => {
+        buffChecked[b.id] = e.target.checked;
+        if (rows.length) showResult();
+      });
+      box.appendChild(lab);
+    });
+  })();
 
   $('#file').addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];
